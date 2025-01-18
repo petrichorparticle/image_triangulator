@@ -8,6 +8,7 @@ use linfa_clustering::KMeans;
 use linfa_nn::distance::L2Dist;
 use ndarray::prelude::*;
 use rand::prelude::*;
+use std::cmp;
 
 fn load_image_to_2d_array(img: DynamicImage)  -> Array3<u8> {
 
@@ -64,7 +65,7 @@ fn colour_cluster(pixel_array: Array3<u8>, n_clusters: usize) -> (Array2<usize>,
     (pixel_ind_array, centroids)
 }
 
-fn save_array_as_image(pixel_ind_array: Array2<usize>, centroids: Vec<Rgb<u8>>, file_path: &str) {
+fn save_array_as_image(pixel_ind_array: &Array2<usize>, centroids: &Vec<Rgb<u8>>, file_path: &str) {
     let &[width,height] = pixel_ind_array.shape() else { todo!() };
 
     // Convert 2D array of indices into flat array of rgb values
@@ -83,11 +84,61 @@ fn save_array_as_image(pixel_ind_array: Array2<usize>, centroids: Vec<Rgb<u8>>, 
     buffer.save(Path::new(file_path)).unwrap();
 }
 
+fn triangle_area(p1: (i32,i32), p2: (i32,i32), p3: (i32,i32)) -> i32 {
+    ((p1.0 * (p2.1 - p3.1))
+        + (p2.0 * (p3.1 - p1.1))
+        + (p3.0 * (p1.1 - p2.1))).abs()
+}
+
+fn is_point_in_triangle(p: (i32,i32), corners: ((i32,i32),(i32,i32),(i32,i32))) -> bool {
+    let (p1,p2,p3) = corners;
+    let area = triangle_area(p1, p2, p3) as f64;
+
+    let area1 = triangle_area(p, p2, p3) as f64;
+    let area2 = triangle_area(p1, p, p3) as f64;
+    let area3 = triangle_area(p1, p2, p) as f64;
+
+    (area1 + area2 + area3 - area).abs() < 1e-6
+}
+
+fn triangle_score(target_pixels: &Array2<usize>, current_pixels: &Array2<usize>, corners: ((i32,i32),(i32,i32),(i32,i32)), colour: usize) -> (Array2<usize>, i32) {
+    let ((x0,y0),(x1,y1),(x2,y2)) = corners;
+    let max_x = cmp::max(cmp::max(x0,x1),x2);
+    let min_x = cmp::min(cmp::min(x0,x1),x2);
+    let max_y = cmp::max(cmp::max(y0,y1),y2);
+    let min_y = cmp::min(cmp::min(y0,y1),y2);
+    assert!(min_x >= 0);
+    assert!(min_y >= 0);
+
+    let mut score: i32 = 0;
+    let mut new_pixels = current_pixels.clone();
+    for x in min_x..(max_x+1) {
+        for y in min_y..(max_y+1) {
+            if is_point_in_triangle((x, y), corners) {
+                let xu = x as usize;
+                let yu = y as usize;
+                new_pixels[[xu,yu]] = colour;
+                if (colour == target_pixels[[xu,yu]]) && (colour != current_pixels[[xu,yu]]) {
+                    score += 1;
+                }
+                else if (current_pixels[[xu,yu]] == target_pixels[[xu,yu]]) && (colour != target_pixels[[xu,yu]]) {
+                    score -= 1;
+                }
+            }
+        }
+    }
+
+    (new_pixels, score)
+}
+
 fn main(){
     let image_dir = "images";
     let in_name = "test.jpg";
-    let out_name = "out.png";
-    let n_clusters: usize = 12;
+    let out_name = "out";
+    let out_ext = "png";
+    let num_colours: usize = 12;
+    let num_rounds: usize = 1000;
+    let num_triangles_per_round: usize = 10000;
     let img: DynamicImage = open(format!("{image_dir}/{in_name}")).unwrap();
 
     // Resize
@@ -98,10 +149,31 @@ fn main(){
 
     // Convert to pixel array and cluster
     let pixel_array = load_image_to_2d_array(resized_img);
-    let (pixel_ind_array, centroids) = colour_cluster(pixel_array, n_clusters);
+    let (target_pixels, centroids) = colour_cluster(pixel_array, num_colours);
+    save_array_as_image(&target_pixels, &centroids, format!("{image_dir}/{out_name}_kmeans.{out_ext}").as_str());
+    
+    let mut art_pixels = Array2::<usize>::zeros(target_pixels.raw_dim());
+    let mut rng = rand::thread_rng();
+    let mut best_pixels = art_pixels.clone();
+    let mut best_score: i32 = 0;
+    for rounds in 0..num_rounds {
+        save_array_as_image(&art_pixels, &centroids, format!("{image_dir}/{out_name}_{rounds}.{out_ext}").as_str());
+        best_score = 0;
+        for _ in 0..num_triangles_per_round {
+            let p0: (i32,i32) = (rng.gen_range(0..new_width) as i32, rng.gen_range(0..new_height) as i32);
+            let p1: (i32,i32) = (rng.gen_range(0..new_width) as i32, rng.gen_range(0..new_height) as i32);
+            let p2: (i32,i32) = (rng.gen_range(0..new_width) as i32, rng.gen_range(0..new_height) as i32);
+            let colour: usize = rng.gen_range(0..num_colours);
+            let (pixels, score) = triangle_score(&target_pixels, &art_pixels, (p0,p1,p2), colour);
+            if score > best_score {
+                best_pixels = pixels;
+                best_score = score;
+            }
+        }
+        art_pixels = best_pixels.clone();
+    }
 
-    // Save pixel array
-    save_array_as_image(pixel_ind_array, centroids, format!("{image_dir}/{out_name}").as_str());
+    save_array_as_image(&art_pixels, &centroids, format!("{image_dir}/{out_name}_final.{out_ext}").as_str());
 
     println!("We're done here!");
 }
